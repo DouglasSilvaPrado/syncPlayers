@@ -3,7 +3,8 @@ name: SoFIFA Sync
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "0 6 * * 0"   # Domingo 03:00 BRT
+    - cron: "0 10 * * 0"  # Domingo 07:00 BRT
 
 concurrency:
   group: sofifa-sync
@@ -12,7 +13,7 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -34,7 +35,7 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           PAGES_PER_RUN: "200"
-          SLEEP_BETWEEN_PAGES: "1.2"
+          SLEEP_BETWEEN_PAGES: "1.0"
           PAGE_GOTO_TIMEOUT_MS: "60000"
           WAIT_SELECTOR_TIMEOUT_MS: "15000"
           MAX_RETRIES: "6"
