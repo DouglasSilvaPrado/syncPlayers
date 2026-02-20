@@ -23,7 +23,7 @@ PLAYERS_PATH = "/players"
 PAGE_SIZE = 60
 HL = "pt-BR"
 
-PAGES_PER_RUN = int(os.environ.get("PAGES_PER_RUN", "10"))
+PAGES_PER_RUN = int(os.environ.get("PAGES_PER_RUN", "200"))
 SLEEP_BETWEEN_PAGES = float(os.environ.get("SLEEP_BETWEEN_PAGES", "1.2"))
 PAGE_GOTO_TIMEOUT_MS = int(os.environ.get("PAGE_GOTO_TIMEOUT_MS", "60000"))
 WAIT_SELECTOR_TIMEOUT_MS = int(os.environ.get("WAIT_SELECTOR_TIMEOUT_MS", "15000"))
