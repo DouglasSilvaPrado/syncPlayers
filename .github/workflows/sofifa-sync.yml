@@ -33,7 +33,7 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          PAGES_PER_RUN: "10"
+          PAGES_PER_RUN: "200"
           SLEEP_BETWEEN_PAGES: "1.2"
           PAGE_GOTO_TIMEOUT_MS: "60000"
           WAIT_SELECTOR_TIMEOUT_MS: "15000"
