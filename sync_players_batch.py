@@ -277,6 +277,10 @@ def chunked(items: List[Any], size: int):
 # -------------------------
 # Playwright fetcher
 # -------------------------
+class EndOfList(Exception):
+    """Usado para sinalizar fim da lista do SoFIFA (ex.: HTTP 404 após último offset)."""
+
+
 def fetch_page_html_with_playwright(page, url: str) -> str:
     delay = 2.0
     last_err: Optional[Exception] = None
@@ -284,8 +288,14 @@ def fetch_page_html_with_playwright(page, url: str) -> str:
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             resp = page.goto(url, wait_until="domcontentloaded", timeout=PAGE_GOTO_TIMEOUT_MS)
-            if resp is not None and resp.status >= 400:
-                raise RuntimeError(f"HTTP {resp.status}")
+            status = resp.status if resp is not None else None
+
+            # ✅ Fim da lista no SoFIFA: depois do último offset válido costuma vir 404
+            if status == 404:
+                raise EndOfList("HTTP 404 (fim da lista)")
+
+            if status is not None and status >= 400:
+                raise RuntimeError(f"HTTP {status}")
 
             try:
                 page.wait_for_selector("tbody tr", timeout=WAIT_SELECTOR_TIMEOUT_MS)
@@ -293,6 +303,9 @@ def fetch_page_html_with_playwright(page, url: str) -> str:
                 pass
 
             return page.content()
+
+        except EndOfList:
+            raise
 
         except Exception as e:
             last_err = e
@@ -321,7 +334,7 @@ def main():
     total_unchanged = 0
     total_pages = 0
 
-    # Guarda assinaturas recentes para detectar "loop" (offset alto retornando páginas repetidas)
+    # detecta loop (offset alto “colapsando” e repetindo páginas)
     recent_page_sigs = deque(maxlen=10)
 
     with sync_playwright() as p:
@@ -351,19 +364,24 @@ def main():
                 url = build_players_url(offset)
                 log(f"🌍 Página {i+1}/{PAGES_PER_RUN} | offset={offset}")
 
-                html = fetch_page_html_with_playwright(page, url)
+                try:
+                    html = fetch_page_html_with_playwright(page, url)
+                except EndOfList:
+                    # ✅ comportamento correto: reseta e encerra SEM ERRO
+                    log("🏁 Fim da lista detectado (HTTP 404). Resetando offset para 0 e encerrando batch.")
+                    offset = 0
+                    set_next_offset(sb_client, offset)
+                    break
+
                 players = parse_list_page(html)
 
-                # Caso MUITO raro: página realmente vazia
                 if not players:
                     log("🏁 Página vazia (fim). Resetando offset para 0.")
                     offset = 0
                     set_next_offset(sb_client, offset)
                     break
 
-                # -------------------------
-                # DETECÇÃO DE LOOP DE OFFSET (correção principal)
-                # -------------------------
+                # assinatura (para detectar repetição/loop)
                 page_ids: List[int] = []
                 for pl in players:
                     pid = pl.get("player_id")
@@ -382,22 +400,17 @@ def main():
                 sig_src = ",".join(map(str, page_ids))
                 page_sig = hashlib.sha256(sig_src.encode("utf-8")).hexdigest()
 
-                # Se repetir uma das últimas páginas, entrou em loop → reseta
-                # (geralmente acontece quando offset passou do fim e SoFIFA volta pro começo)
+                # se começar a repetir em offsets altos → loop → reseta
                 if offset > 10000 and page_sig in recent_page_sigs:
-                    log("🔁 Página repetida detectada (loop de offset). Resetando offset para 0.")
+                    log("🔁 Página repetida detectada (loop de offset). Resetando offset para 0 e encerrando batch.")
                     offset = 0
                     set_next_offset(sb_client, offset)
                     break
 
                 recent_page_sigs.append(page_sig)
-
-                # Log extra útil (visualiza quando começou a repetir)
                 log(f"ℹ️ IDs página: first={page_ids[0]} last={page_ids[-1]}")
 
-                # -------------------------
-                # Monta rows e calcula hash
-                # -------------------------
+                # monta rows + hash
                 rows: List[Dict[str, Any]] = []
                 sofifa_ids: List[int] = []
 
@@ -418,7 +431,6 @@ def main():
                 total_players_seen += len(rows)
                 total_pages += 1
 
-                # hashes atuais do DB pra comparar
                 current_hashes = fetch_hashes_for_ids(sb_client, sofifa_ids)
 
                 changed_rows: List[Dict[str, Any]] = []
@@ -432,11 +444,9 @@ def main():
                     else:
                         changed_rows.append(r)
 
-                # Upsert só do que mudou (ou não existia antes)
                 for batch in chunked(changed_rows, 200):
                     upsert_players(sb_client, batch)
 
-                # Pros que não mudaram, só atualiza last_synced
                 for batch_ids in chunked(unchanged_ids, 400):
                     patch_last_synced(sb_client, batch_ids, now_iso)
 
