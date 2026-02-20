@@ -4,6 +4,7 @@ import re
 import json
 import time
 import hashlib
+from collections import deque
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 from urllib.parse import urlencode, urljoin
@@ -38,8 +39,10 @@ SHOW_COLS = [
 ]
 BASE_PARAMS = {"col": "tt", "sort": "desc"}
 
+
 def log(msg: str):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+
 
 # -------------------------
 # Parser (igual ao seu)
@@ -208,6 +211,7 @@ def parse_list_page(html: str) -> List[Dict[str, Any]]:
 
     return players
 
+
 # -------------------------
 # Supabase REST helpers
 # -------------------------
@@ -241,14 +245,8 @@ def set_next_offset(sb_client: httpx.Client, next_offset: int):
     r.raise_for_status()
 
 def fetch_hashes_for_ids(sb_client: httpx.Client, sofifa_ids: List[int]) -> Dict[int, Optional[str]]:
-    """
-    Busca hashes atuais no DB para comparar.
-    Usa filtro in.(...) no PostgREST.
-    """
     if not sofifa_ids:
         return {}
-
-    # PostgREST: sofifa_player_id=in.(1,2,3)
     ids_str = ",".join(str(i) for i in sofifa_ids)
     url = f"{SUPABASE_URL}/rest/v1/players?sofifa_player_id=in.({ids_str})&select=sofifa_player_id,sofifa_hash"
     r = sb_client.get(url, headers=sb_headers())
@@ -263,9 +261,6 @@ def upsert_players(sb_client: httpx.Client, rows: List[Dict[str, Any]]):
     r.raise_for_status()
 
 def patch_last_synced(sb_client: httpx.Client, sofifa_ids: List[int], now_iso: str):
-    """
-    Atualiza somente sofifa_last_synced_at (sem mexer no resto) para os que não mudaram.
-    """
     if not sofifa_ids:
         return
     ids_str = ",".join(str(i) for i in sofifa_ids)
@@ -277,6 +272,7 @@ def patch_last_synced(sb_client: httpx.Client, sofifa_ids: List[int], now_iso: s
 def chunked(items: List[Any], size: int):
     for i in range(0, len(items), size):
         yield items[i:i+size]
+
 
 # -------------------------
 # Playwright fetcher
@@ -308,6 +304,7 @@ def fetch_page_html_with_playwright(page, url: str) -> str:
 
     raise RuntimeError(f"Falha ao baixar {url}: {last_err}")
 
+
 # =========================
 # Main
 # =========================
@@ -323,6 +320,9 @@ def main():
     total_changed = 0
     total_unchanged = 0
     total_pages = 0
+
+    # Guarda assinaturas recentes para detectar "loop" (offset alto retornando páginas repetidas)
+    recent_page_sigs = deque(maxlen=10)
 
     with sync_playwright() as p:
         log("🚀 Abrindo Chromium (headless=True)")
@@ -354,13 +354,50 @@ def main():
                 html = fetch_page_html_with_playwright(page, url)
                 players = parse_list_page(html)
 
+                # Caso MUITO raro: página realmente vazia
                 if not players:
                     log("🏁 Página vazia (fim). Resetando offset para 0.")
                     offset = 0
                     set_next_offset(sb_client, offset)
                     break
 
-                # transforma em rows e calcula hash
+                # -------------------------
+                # DETECÇÃO DE LOOP DE OFFSET (correção principal)
+                # -------------------------
+                page_ids: List[int] = []
+                for pl in players:
+                    pid = pl.get("player_id")
+                    if pid:
+                        try:
+                            page_ids.append(int(pid))
+                        except:
+                            pass
+
+                if not page_ids:
+                    log("🏁 Página sem IDs (fim). Resetando offset para 0.")
+                    offset = 0
+                    set_next_offset(sb_client, offset)
+                    break
+
+                sig_src = ",".join(map(str, page_ids))
+                page_sig = hashlib.sha256(sig_src.encode("utf-8")).hexdigest()
+
+                # Se repetir uma das últimas páginas, entrou em loop → reseta
+                # (geralmente acontece quando offset passou do fim e SoFIFA volta pro começo)
+                if offset > 10000 and page_sig in recent_page_sigs:
+                    log("🔁 Página repetida detectada (loop de offset). Resetando offset para 0.")
+                    offset = 0
+                    set_next_offset(sb_client, offset)
+                    break
+
+                recent_page_sigs.append(page_sig)
+
+                # Log extra útil (visualiza quando começou a repetir)
+                log(f"ℹ️ IDs página: first={page_ids[0]} last={page_ids[-1]}")
+
+                # -------------------------
+                # Monta rows e calcula hash
+                # -------------------------
                 rows: List[Dict[str, Any]] = []
                 sofifa_ids: List[int] = []
 
@@ -381,7 +418,7 @@ def main():
                 total_players_seen += len(rows)
                 total_pages += 1
 
-                # pega hashes atuais do DB pra comparar
+                # hashes atuais do DB pra comparar
                 current_hashes = fetch_hashes_for_ids(sb_client, sofifa_ids)
 
                 changed_rows: List[Dict[str, Any]] = []
@@ -395,11 +432,11 @@ def main():
                     else:
                         changed_rows.append(r)
 
-                # upsert só do que mudou (ou não existia antes)
+                # Upsert só do que mudou (ou não existia antes)
                 for batch in chunked(changed_rows, 200):
                     upsert_players(sb_client, batch)
 
-                # pros que não mudaram, só atualiza last_synced
+                # Pros que não mudaram, só atualiza last_synced
                 for batch_ids in chunked(unchanged_ids, 400):
                     patch_last_synced(sb_client, batch_ids, now_iso)
 
@@ -417,7 +454,11 @@ def main():
             browser.close()
             sb_client.close()
 
-    log(f"✅ Sync done | pages={total_pages} | vistos={total_players_seen} | mudaram={total_changed} | iguais={total_unchanged} | next_offset={offset}")
+    log(
+        f"✅ Sync done | pages={total_pages} | vistos={total_players_seen} | "
+        f"mudaram={total_changed} | iguais={total_unchanged} | next_offset={offset}"
+    )
+
 
 if __name__ == "__main__":
     main()
