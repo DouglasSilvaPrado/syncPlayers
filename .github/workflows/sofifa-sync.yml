@@ -1,9 +1,9 @@
 name: SoFIFA Sync
 
 on:
-  schedule:
-   - cron: "*/5 * * * *"
   workflow_dispatch:
+  schedule:
+    - cron: "*/15 * * * *"
 
 concurrency:
   group: sofifa-sync
@@ -12,6 +12,8 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+
     steps:
       - uses: actions/checkout@v4
 
