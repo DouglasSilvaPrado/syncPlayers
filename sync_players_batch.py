@@ -4,18 +4,17 @@ import re
 import json
 import time
 import hashlib
-from collections import deque
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 from urllib.parse import urlencode, urljoin
 
 import httpx
 from bs4 import BeautifulSoup
-from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
-load_dotenv()
-
+# =========================
+# Env
+# =========================
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 
@@ -30,6 +29,8 @@ PAGE_GOTO_TIMEOUT_MS = int(os.environ.get("PAGE_GOTO_TIMEOUT_MS", "60000"))
 WAIT_SELECTOR_TIMEOUT_MS = int(os.environ.get("WAIT_SELECTOR_TIMEOUT_MS", "15000"))
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "6"))
 
+FORCE_REFRESH_IDS = os.environ.get("FORCE_REFRESH_IDS", "").strip()
+
 SHOW_COLS = [
     "ae","oa","pt","vl","wg","tt","pi","by","hi","wi","pf","bo","bp","gu","jt","le","rc",
     "ta","cr","fi","he","sh","vo","ts","dr","fr","cu","lo","bl","to","ac","sp","ag","re",
@@ -39,14 +40,19 @@ SHOW_COLS = [
 ]
 BASE_PARAMS = {"col": "tt", "sort": "desc"}
 
-
+# =========================
+# Utils
+# =========================
 def log(msg: str):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
+def chunked(items: List[Any], size: int):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
 
-# -------------------------
-# Parser (igual ao seu)
-# -------------------------
+# =========================
+# Parser (igual seu)
+# =========================
 def normalize_height(s: str) -> str:
     if not s:
         return s
@@ -211,10 +217,9 @@ def parse_list_page(html: str) -> List[Dict[str, Any]]:
 
     return players
 
-
-# -------------------------
+# =========================
 # Supabase REST helpers
-# -------------------------
+# =========================
 def sb_headers() -> Dict[str, str]:
     return {
         "apikey": SUPABASE_SERVICE_ROLE_KEY,
@@ -269,17 +274,21 @@ def patch_last_synced(sb_client: httpx.Client, sofifa_ids: List[int], now_iso: s
     r = sb_client.patch(url, headers=headers, json={"sofifa_last_synced_at": now_iso})
     r.raise_for_status()
 
-def chunked(items: List[Any], size: int):
-    for i in range(0, len(items), size):
-        yield items[i:i+size]
+def mark_force_refresh(sb_client: httpx.Client, ids: List[int]):
+    """Zera sofifa_hash para forçar re-sync (útil pra testes)."""
+    if not ids:
+        return
+    ids_str = ",".join(str(i) for i in ids)
+    url = f"{SUPABASE_URL}/rest/v1/players?sofifa_player_id=in.({ids_str})"
+    headers = {**sb_headers(), "Prefer": "return=minimal"}
+    r = sb_client.patch(url, headers=headers, json={"sofifa_hash": None})
+    r.raise_for_status()
 
-
-# -------------------------
+# =========================
 # Playwright fetcher
-# -------------------------
-class EndOfList(Exception):
-    """Usado para sinalizar fim da lista do SoFIFA (ex.: HTTP 404 após último offset)."""
-
+# =========================
+class EndOfList404(Exception):
+    pass
 
 def fetch_page_html_with_playwright(page, url: str) -> str:
     delay = 2.0
@@ -288,14 +297,13 @@ def fetch_page_html_with_playwright(page, url: str) -> str:
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             resp = page.goto(url, wait_until="domcontentloaded", timeout=PAGE_GOTO_TIMEOUT_MS)
-            status = resp.status if resp is not None else None
 
-            # ✅ Fim da lista no SoFIFA: depois do último offset válido costuma vir 404
-            if status == 404:
-                raise EndOfList("HTTP 404 (fim da lista)")
-
-            if status is not None and status >= 400:
-                raise RuntimeError(f"HTTP {status}")
+            if resp is not None:
+                status = resp.status
+                if status == 404:
+                    raise EndOfList404("HTTP 404 (fim da lista)")
+                if status >= 400:
+                    raise RuntimeError(f"HTTP {status}")
 
             try:
                 page.wait_for_selector("tbody tr", timeout=WAIT_SELECTOR_TIMEOUT_MS)
@@ -304,9 +312,8 @@ def fetch_page_html_with_playwright(page, url: str) -> str:
 
             return page.content()
 
-        except EndOfList:
+        except EndOfList404:
             raise
-
         except Exception as e:
             last_err = e
             if attempt == MAX_RETRIES:
@@ -317,14 +324,24 @@ def fetch_page_html_with_playwright(page, url: str) -> str:
 
     raise RuntimeError(f"Falha ao baixar {url}: {last_err}")
 
-
 # =========================
 # Main
 # =========================
 def main():
     now_iso = datetime.now(timezone.utc).isoformat()
-    sb_timeout = httpx.Timeout(30.0)
-    sb_client = httpx.Client(timeout=sb_timeout, follow_redirects=True)
+
+    sb_client = httpx.Client(timeout=httpx.Timeout(30.0), follow_redirects=True)
+
+    # Forçar refresh de IDs específicos (teste)
+    force_ids: List[int] = []
+    if FORCE_REFRESH_IDS:
+        try:
+            force_ids = [int(x.strip()) for x in FORCE_REFRESH_IDS.split(",") if x.strip()]
+        except Exception:
+            force_ids = []
+    if force_ids:
+        log(f"🧪 FORCE_REFRESH_IDS ativo: {force_ids} -> set sofifa_hash=NULL")
+        mark_force_refresh(sb_client, force_ids)
 
     offset = get_next_offset(sb_client)
     log(f"▶️ Sync start | next_offset={offset} | pages_per_run={PAGES_PER_RUN}")
@@ -333,9 +350,6 @@ def main():
     total_changed = 0
     total_unchanged = 0
     total_pages = 0
-
-    # detecta loop (offset alto “colapsando” e repetindo páginas)
-    recent_page_sigs = deque(maxlen=10)
 
     with sync_playwright() as p:
         log("🚀 Abrindo Chromium (headless=True)")
@@ -350,6 +364,7 @@ def main():
             extra_http_headers={"Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.7,en;q=0.6"},
         )
 
+        # bloqueia imagens/mídia/fontes
         context.route(
             "**/*",
             lambda route, request: route.abort()
@@ -366,54 +381,33 @@ def main():
 
                 try:
                     html = fetch_page_html_with_playwright(page, url)
-                except EndOfList:
-                    # ✅ comportamento correto: reseta e encerra SEM ERRO
+                except EndOfList404:
                     log("🏁 Fim da lista detectado (HTTP 404). Resetando offset para 0 e encerrando batch.")
                     offset = 0
                     set_next_offset(sb_client, offset)
                     break
 
                 players = parse_list_page(html)
-
                 if not players:
-                    log("🏁 Página vazia (fim). Resetando offset para 0.")
+                    log("🏁 Página vazia. Resetando offset para 0 e encerrando batch.")
                     offset = 0
                     set_next_offset(sb_client, offset)
                     break
 
-                # assinatura (para detectar repetição/loop)
-                page_ids: List[int] = []
+                # IDs da página (debug)
+                page_ids = []
                 for pl in players:
-                    pid = pl.get("player_id")
-                    if pid:
+                    if pl.get("player_id"):
                         try:
-                            page_ids.append(int(pid))
+                            page_ids.append(int(pl["player_id"]))
                         except:
                             pass
-
-                if not page_ids:
-                    log("🏁 Página sem IDs (fim). Resetando offset para 0.")
-                    offset = 0
-                    set_next_offset(sb_client, offset)
-                    break
-
-                sig_src = ",".join(map(str, page_ids))
-                page_sig = hashlib.sha256(sig_src.encode("utf-8")).hexdigest()
-
-                # se começar a repetir em offsets altos → loop → reseta
-                if offset > 10000 and page_sig in recent_page_sigs:
-                    log("🔁 Página repetida detectada (loop de offset). Resetando offset para 0 e encerrando batch.")
-                    offset = 0
-                    set_next_offset(sb_client, offset)
-                    break
-
-                recent_page_sigs.append(page_sig)
-                log(f"ℹ️ IDs página: first={page_ids[0]} last={page_ids[-1]}")
+                if page_ids:
+                    log(f"ℹ️ IDs página: first={page_ids[0]} last={page_ids[-1]}")
 
                 # monta rows + hash
                 rows: List[Dict[str, Any]] = []
                 sofifa_ids: List[int] = []
-
                 for pl in players:
                     pid = pl.get("player_id")
                     if not pid:
@@ -439,7 +433,8 @@ def main():
                 for r in rows:
                     sid = r["sofifa_player_id"]
                     old_hash = current_hashes.get(sid)
-                    if old_hash == r["sofifa_hash"] and old_hash is not None:
+
+                    if old_hash is not None and old_hash == r["sofifa_hash"]:
                         unchanged_ids.append(sid)
                     else:
                         changed_rows.append(r)
@@ -468,7 +463,6 @@ def main():
         f"✅ Sync done | pages={total_pages} | vistos={total_players_seen} | "
         f"mudaram={total_changed} | iguais={total_unchanged} | next_offset={offset}"
     )
-
 
 if __name__ == "__main__":
     main()
