@@ -1,5 +1,1 @@
-playwright
-httpx
-beautifulsoup4
-lxml
-python-dotenv
+httpx>=0.27,<1

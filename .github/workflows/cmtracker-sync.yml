@@ -1,0 +1,55 @@
+name: CMTracker Sync
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'inspect / dry-run / apply (produção)'
+        required: true
+        type: choice
+        options: [inspect, dry-run, apply]
+        default: inspect
+      db_slug:
+        description: 'Opcional: slug da versão (vazio = tentar detectar)'
+        required: false
+        type: string
+  schedule:
+    - cron: '0 10 * * 0' # Domingo, 07:00 BRT (UTC-3)
+permissions:
+  contents: read
+concurrency:
+  group: cmtracker-sync
+  cancel-in-progress: false
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements.txt
+      - name: Sync CMTracker
+        env:
+          CMTRACKER_API_KEY: ${{ secrets.CMTRACKER_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          CMTRACKER_DB_SLUG: ${{ inputs.db_slug }}
+          CMTRACKER_ALLOW_WRITE: ${{ vars.CMTRACKER_ALLOW_WRITE }}
+          CMTRACKER_MAX_PAGES: '20'
+          CMTRACKER_PAGE_SIZE: '25'
+          MODE: ${{ inputs.mode }}
+          EVENT_NAME: ${{ github.event_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Scheduled runs apply only after an explicit repository variable is enabled.
+          if [[ "$EVENT_NAME" == "schedule" ]]; then
+            if [[ "$CMTRACKER_ALLOW_WRITE" == "YES" ]]; then MODE=apply; else MODE=dry-run; fi
+          fi
+          case "$MODE" in
+            inspect) python sync_cmtracker.py --inspect ;;
+            dry-run|"") python sync_cmtracker.py ;;
+            apply) python sync_cmtracker.py --apply ;;
+            *) echo 'Modo inválido' >&2; exit 1 ;;
+          esac
