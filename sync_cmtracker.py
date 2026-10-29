@@ -16,14 +16,12 @@ MAX_PAGES = int(os.getenv('CMTRACKER_MAX_PAGES', '20'))
 DELAY = float(os.getenv('CMTRACKER_DELAY_SECONDS', '1.0'))
 # API endpoint/parameter conventions can be changed without editing code.
 PAGE_PARAM = os.getenv('CMTRACKER_PAGE_PARAM', 'page')
-SIZE_PARAM = os.getenv('CMTRACKER_PAGE_SIZE_PARAM', 'pageSize')
+SIZE_PARAM = os.getenv('CMTRACKER_PAGE_SIZE_PARAM', 'limit')
 DB_PARAM = os.getenv('CMTRACKER_DB_PARAM', 'db')
 FIRST_PAGE = int(os.getenv('CMTRACKER_FIRST_PAGE', '0'))
 DB_SLUG = os.getenv('CMTRACKER_DB_SLUG', '').strip()
 TOKEN = os.getenv('CMTRACKER_API_KEY', '').strip()
-AUTH_HEADER = os.getenv('CMTRACKER_AUTH_HEADER', 'x-api-key').strip()
-if AUTH_HEADER.lower() not in ('x-api-key', 'authorization'):
-    raise SystemExit('CMTRACKER_AUTH_HEADER deve ser x-api-key ou authorization')
+AUTH_HEADER = 'X-API-Key'  # CMTracker documentation: required header
 SUPABASE_URL = os.getenv('SUPABASE_URL', '').rstrip('/')
 SUPABASE_KEY = os.getenv('SUPABASE_SERVICE_ROLE_KEY', '')
 TIMEOUT = httpx.Timeout(40.0)
@@ -49,7 +47,7 @@ def info(s):
 def fetch_json(client, path, params=None):
     headers = {'Accept': 'application/json'}
     if TOKEN:
-        headers[AUTH_HEADER] = TOKEN if AUTH_HEADER.lower() != 'authorization' else f'Bearer {TOKEN}'
+        headers[AUTH_HEADER] = TOKEN
     for attempt in range(5):
         try:
             r = client.get(f'{API_BASE}/{path.lstrip("/")}', params=params, headers=headers)
@@ -61,8 +59,8 @@ def fetch_json(client, path, params=None):
             if r.status_code in (401, 403):
                 raise SystemExit(
                     f'CMTracker HTTP {r.status_code} em {path}: autenticação recusada. '
-                    'Confira CMTRACKER_API_KEY nos Repository secrets e o formato do header '
-                    '(CMTRACKER_AUTH_HEADER=x-api-key ou authorization). '
+                    'Confira se CMTRACKER_API_KEY é a chave ativa fornecida pelo CMTracker, '
+                    'e se possui acesso ao banco selecionado. Cabeçalho X-API-Key já configurado. '
                     'A resposta não foi registrada para proteger credenciais.'
                 )
             r.raise_for_status()

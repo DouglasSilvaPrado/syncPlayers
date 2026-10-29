@@ -53,3 +53,12 @@ python sync_cmtracker.py
 2. Execute `inspect`. O log informa `Credencial CMTracker: configurada` sem revelar o segredo.
 3. Caso continue 401, consulte a seção **Authentication** da documentação privada do CMTracker. Se exigir `Authorization: Bearer`, crie a **Repository variable** `CMTRACKER_AUTH_HEADER` com valor `authorization`. Se exigir `x-api-key`, mantenha o valor padrão. Não experimente formatos indiscriminadamente.
 4. Confirme que a chave está ativa e aprovada para acessar `/api/v1/players`. Nunca cole a chave nos logs ou aqui.
+
+
+## Autenticação e paginação (documentação CMTracker)
+
+O endpoint oficial de jogadores é `GET https://api.cmtracker.net/api/v1/players?db=26100100&limit=25&page=0` com o cabeçalho HTTP `X-API-Key: <chave>`. O script já usa **X-API-Key** e **limit**, não `pageSize`.
+
+Se aparecer `401 Unauthorized`, confira o valor do Secret `CMTRACKER_API_KEY` e confirme com o CMTracker que a chave tem acesso à versão escolhida. Não exponha a chave nem cole logs com secrets. `CMTRACKER_API_MODE`, `CMTRACKER_SYNC_SECRET` e `CMTRACKER_PROXY_SECRET` são usados pela integração interna da Liga Virtual e não fazem parte deste fluxo de consulta direta à API.
+
+Após resolver o `401`, execute `inspect` para checar os campos retornados, depois `dry-run`. Não habilite `CMTRACKER_ALLOW_WRITE=YES` até validar o mapeamento e o resultado da simulação.
