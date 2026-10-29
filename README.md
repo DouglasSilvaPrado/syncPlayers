@@ -46,3 +46,10 @@ python sync_cmtracker.py
 - Nunca compartilhe `.env` ou service_role em ZIPs, commits, prints ou logs.
 - Se o campo `id` do CMTracker for o EA player ID e não existir `eaPlayerId`, habilite `CMTRACKER_ID_IS_EA_ID=true` **somente depois de confirmar**.
 - A API do CMTracker informa limites de 100 req/min e 25.000 req/mês. Ajuste número de páginas e intervalo para respeitá-los.
+
+## Se a API responder HTTP 401
+
+1. Confira que `CMTRACKER_API_KEY` foi criado como **Repository secret**, com a chave da API (não senha do portal). O nome deve ser exato.
+2. Execute `inspect`. O log informa `Credencial CMTracker: configurada` sem revelar o segredo.
+3. Caso continue 401, consulte a seção **Authentication** da documentação privada do CMTracker. Se exigir `Authorization: Bearer`, crie a **Repository variable** `CMTRACKER_AUTH_HEADER` com valor `authorization`. Se exigir `x-api-key`, mantenha o valor padrão. Não experimente formatos indiscriminadamente.
+4. Confirme que a chave está ativa e aprovada para acessar `/api/v1/players`. Nunca cole a chave nos logs ou aqui.

@@ -21,7 +21,9 @@ DB_PARAM = os.getenv('CMTRACKER_DB_PARAM', 'db')
 FIRST_PAGE = int(os.getenv('CMTRACKER_FIRST_PAGE', '0'))
 DB_SLUG = os.getenv('CMTRACKER_DB_SLUG', '').strip()
 TOKEN = os.getenv('CMTRACKER_API_KEY', '').strip()
-AUTH_HEADER = os.getenv('CMTRACKER_AUTH_HEADER', 'x-api-key')
+AUTH_HEADER = os.getenv('CMTRACKER_AUTH_HEADER', 'x-api-key').strip()
+if AUTH_HEADER.lower() not in ('x-api-key', 'authorization'):
+    raise SystemExit('CMTRACKER_AUTH_HEADER deve ser x-api-key ou authorization')
 SUPABASE_URL = os.getenv('SUPABASE_URL', '').rstrip('/')
 SUPABASE_KEY = os.getenv('SUPABASE_SERVICE_ROLE_KEY', '')
 TIMEOUT = httpx.Timeout(40.0)
@@ -56,6 +58,13 @@ def fetch_json(client, path, params=None):
                     pause = max(float(r.headers.get('Retry-After', '0') or 0), min(2 ** attempt * 3, 60))
                     time.sleep(pause)
                     continue
+            if r.status_code in (401, 403):
+                raise SystemExit(
+                    f'CMTracker HTTP {r.status_code} em {path}: autenticação recusada. '
+                    'Confira CMTRACKER_API_KEY nos Repository secrets e o formato do header '
+                    '(CMTRACKER_AUTH_HEADER=x-api-key ou authorization). '
+                    'A resposta não foi registrada para proteger credenciais.'
+                )
             r.raise_for_status()
             return r.json()
         except (httpx.TimeoutException, httpx.NetworkError):
@@ -173,6 +182,9 @@ def main():
     args = ap.parse_args()
     if PAGE_SIZE < 1 or PAGE_SIZE > 100 or MAX_PAGES < 1:
         raise SystemExit('PAGE_SIZE deve ser 1..100; MAX_PAGES deve ser positivo')
+    if not TOKEN:
+        raise SystemExit('CMTRACKER_API_KEY ausente/vazio. Adicione em Settings > Secrets and variables > Actions > Repository secrets.')
+    info(f'Credencial CMTracker: configurada | cabeçalho: {AUTH_HEADER}')
     if not args.inspect and (not SUPABASE_URL or not SUPABASE_KEY):
         raise SystemExit('SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY são obrigatórios')
     if args.apply and os.getenv('CMTRACKER_ALLOW_WRITE') != 'YES':
